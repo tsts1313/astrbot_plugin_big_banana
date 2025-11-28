@@ -11,16 +11,10 @@ from astrbot.api import logger
 class Utils:
     def __init__(
         self,
-        main_provider: dict,
         network_config: dict,
         def_params: dict,
         max_retry: int,
     ):
-        # 解构主提供商配置
-        self.api_url = main_provider.get(
-            "api_url", "https://generativelanguage.googleapis.com/v1beta/models"
-        )
-        self.model = main_provider.get("model", "gemini-2.5-flash-image")
         # 初始化异步HTTP会话
         proxy = network_config.get("proxy", None)
         self.proxies: ProxySpec | None = (
@@ -31,15 +25,11 @@ class Utils:
         )
 
         # 默认参数
-        self.api_type = main_provider.get("api_type", "Gemini")
         self.image_size = def_params.get("image_size", "1K")
         self.aspect_ratio = def_params.get("aspect_ratio", "default")
         self.google_search = def_params.get("google_search", False)
-        self.only_image_response = def_params.get("only_image_response", False)
+        self.text_response = def_params.get("text_response", False)
         self.max_retry = max_retry
-
-        # Imghippo 图床配置
-        self.imghippo_key = main_provider.get("imghippo_key", "").encode("utf-8")
 
     def _handle_image(self, image_bytes: bytes) -> tuple[str, str]:
         try:
@@ -95,7 +85,11 @@ class Utils:
         return image_b64_list
 
     def _build_gemini_context(
-        self, prompt: str, image_b64_list: list[tuple[str, str]], params: dict
+        self,
+        model: str,
+        prompt: str,
+        image_b64_list: list[tuple[str, str]],
+        params: dict,
     ) -> dict:
         # 处理图片内容部分
         parts = []
@@ -111,44 +105,53 @@ class Utils:
 
         # 处理响应内容的类型
         responseModalities = ["IMAGE"]
-        if not params.get(
-            "only_image_response", self.only_image_response
-        ) or params.get("google_search", self.google_search):
+        if params.get("text_response", self.text_response):
             responseModalities.insert(0, "TEXT")
-        # 处理图片分辨率参数
-        image_size = params.get("image_size", self.image_size)
+
         # 构建请求上下文
         context = {
             "contents": [{"parts": [{"text": prompt}, *parts]}],
             "generationConfig": {
                 "responseModalities": responseModalities,
-                "imageConfig": {"imageSize": image_size},
             },
             "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
                 {
                     "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
                 {
                     "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_NONE",
+                    "threshold": "OFF",
                 },
             ],
         }
-        # 处理工具类
-        if params.get("google_search", self.google_search):
-            context["tools"] = [{"google_search": {}}]
+
         # 处理图片宽高比参数
         aspect_ratio = params.get("aspect_ratio", self.aspect_ratio)
         if aspect_ratio != "default":
             context["generationConfig"]["imageConfig"] = {"aspectRatio": aspect_ratio}
+
+        # 以下参数仅 Gemini-3-Pro-Image-Preview 模型有效
+        if model == "gemini-3-pro-image-preview":
+            # 处理工具类
+            if (
+                params.get("google_search", self.google_search)
+                and model == "gemini-3-pro-image-preview"
+            ):
+                context["tools"] = [{"google_search": {}}]
+            # 处理图片分辨率参数
+            image_size = params.get("image_size", self.image_size)
+            context["generationConfig"]["imageConfig"] = {"imageSize": image_size}
+
         return context
 
     async def _call_gemini_api(
         self,
+        api_url: str,
         api_key: str,
+        model: str,
         prompt: str,
         image_b64_list: list[tuple[str, str]],
         params: dict,
@@ -157,8 +160,10 @@ class Utils:
             "Content-Type": "application/json",
             "x-goog-api-key": api_key,
         }
-        url = f"{self.api_url}/{self.model}:generateContent"
-        gemini_context = self._build_gemini_context(prompt, image_b64_list, params)
+        url = f"{api_url}/{model}:generateContent"
+        gemini_context = self._build_gemini_context(
+            model, prompt, image_b64_list, params
+        )
         try:
             response = await self.session.post(
                 url, headers=headers, json=gemini_context, proxies=self.proxies
@@ -185,7 +190,7 @@ class Utils:
                     if result.get("promptFeedback", {}):
                         return (
                             None,
-                            f"请求被内容安全系统拦截，原因：{result.get('promptFeedback', {}).get('blockReason', '')}",
+                            f"请求被内容安全系统拦截，原因：{result.get('promptFeedback', {}).get('blockReason', '未获取到原因')}",
                         )
                     return None, "响应中未包含图片数据"
                 return b64_images, None
@@ -193,17 +198,17 @@ class Utils:
                 logger.error(
                     f"图片生成失败，状态码: {response.status_code}, 响应内容: {response.text}"
                 )
-                err_msg = result.get("error", {}).get("message", "图片生成失败")
+                err_msg = result.get("error", {}).get("message", "未知原因")
                 return None, f"图片生成失败：{err_msg}"
         except Timeout as e:
             logger.error(f"网络请求超时: {e}")
-            return None, "图片生成失败：请求超时"
+            return None, "图片生成失败：响应超时"
         except Exception as e:
             logger.error(f"请求错误: {e}")
             return None, "图片生成失败"
 
     def _build_openai_context(
-        self, prompt: str, image_b64_list: list[tuple[str, str]]
+        self, model, prompt: str, image_b64_list: list[tuple[str, str]]
     ) -> dict:
         images_content = []
         for mime, b64 in image_b64_list:
@@ -211,7 +216,7 @@ class Utils:
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
             )
         context = {
-            "model": self.model,
+            "model": model,
             "stream": False,
             "messages": [
                 {
@@ -223,16 +228,21 @@ class Utils:
         return context
 
     async def _call_openai_api(
-        self, api_key: str, prompt: str, image_b64_list: list[tuple[str, str]]
+        self,
+        api_url: str,
+        model,
+        api_key: str,
+        prompt: str,
+        image_b64_list: list[tuple[str, str]],
     ):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
-        openai_context = self._build_openai_context(prompt, image_b64_list)
+        openai_context = self._build_openai_context(model, prompt, image_b64_list)
         try:
             response = await self.session.post(
-                self.api_url, headers=headers, json=openai_context, proxies=self.proxies
+                api_url, headers=headers, json=openai_context, proxies=self.proxies
             )
             result = response.json()
             if response.status_code == 200:
@@ -241,24 +251,29 @@ class Utils:
                 logger.error(
                     f"图片生成失败，状态码: {response.status_code}, 响应内容: {response.text}"
                 )
-                return None, result.get("error", {}).get("message", "图片生成失败")
+                return None, result.get("error", {}).get("message", "未知原因")
         except Timeout as e:
             logger.error(f"网络请求超时: {e}")
-            return None, "图片生成失败：请求超时"
+            return None, "图片生成失败：响应超时"
         except Exception as e:
             logger.error(f"请求错误: {e}")
             return None, "图片生成失败"
 
     async def generate_images(
         self,
+        api_type: str,
+        api_url: str,
+        model: str,
         api_key: str,
         prompt: str,
         image_b64_list: list[tuple[str, str]] = [],
         params: dict = {},
     ) -> tuple[list[tuple[str, str]] | None, str | None]:
         for _ in range(self.max_retry):
-            if self.api_type == "Gemini":
+            if api_type == "Gemini":
                 image_b64, err = await self._call_gemini_api(
+                    api_url=api_url,
+                    model=model,
                     api_key=api_key,
                     prompt=prompt,
                     image_b64_list=image_b64_list,
@@ -266,7 +281,7 @@ class Utils:
                 )
             else:
                 # 不同平台的OpenAI规范接口返回的响应不太统一，留待以后再做。
-                logger.error(f"不支持的API类型: {self.api_type}")
+                logger.error(f"不支持的API类型: {api_type}")
                 return None, "❌ 不支持的API类型"
             if err is None:
                 return image_b64, None

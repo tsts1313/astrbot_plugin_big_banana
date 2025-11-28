@@ -1,9 +1,1 @@
-# helloworld
-
-AstrBot 插件模板
-
-A template plugin for AstrBot plugin feature
-
-# 支持
-
-[帮助文档](https://astrbot.app)
+Beta: 在项目版本更新到 1.0.0 之前，本项目代码不保证向前兼容。建议在每次更新插件的时候，删除插件配置。
