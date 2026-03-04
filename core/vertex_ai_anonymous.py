@@ -111,10 +111,10 @@ class VertexAIAnonymousProvider(BaseProvider):
                             )
                             err_msg = err.get("message", "")
                             # 应该包装错误而不是直接打印，但是现在重构太麻烦了
-                            # if err_msg not in "Failed to verify action":
-                            #     logger.error(
-                            #         f"[BIG BANANA] 图片生成失败，错误代码：{status}，错误原因：{err_msg}"
-                            #     )
+                            if err_msg not in "Failed to verify action":
+                                logger.error(
+                                    f"[BIG BANANA] 图片生成失败，错误代码：{status}，错误原因：{err_msg}"
+                                )
                             return None, status, err_msg
                         # 没有错误，应该是正常响应
                         for candidate in item.get("data", {}).get("candidates", []):
